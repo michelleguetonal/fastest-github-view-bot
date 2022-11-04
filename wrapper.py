@@ -1,79 +1,111 @@
-import ssl
 import socket
-import re
-import multiprocessing
+import ssl
+import json
 
-class HTTP:
-    def get_req(self, host, path, port=80, ssl=False):
-        if ssl:
-            socket_ = ssl.wrap_socket(socket.socket(socket.AF_INET, socket.SOCK_STREAM))
+
+blocksize = 1024 ** 2
+ssl_context = ssl.create_default_context()
+
+class ProxyError(Exception):
+    """Raises an error when client proxy has not worked"""
+    pass
+
+class Client:
+    
+    def __init__(self, host, proxy=None, timeout=5):
+        self.host = host
+        self.timeout = timeout
+
+        if proxy is None:
+            self.connection = self.create()
         else:
-            socket_ = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            socket_.connect((host, port))
-            socket_.send(
-            f"GET {path} HTTP/1.0\r\nHost: {host}\r\n\r\n".encode('utf-8')
+            self.proxy = proxy.split(":")
+            self.connection = self.createProxy()
+
+    @property
+    def connection(self):
+        return self._connection
+
+    @connection.setter
+    def connection(self, value):
+        if value is None:
+            raise ProxyError("Proxy has failed to connect")
+        else:
+            self._connection = value
+
+    def sslWrap(self, sock):
+        sock = ssl_context.wrap_socket(
+            sock,
+            server_side=False,
+            do_handshake_on_connect=False,
+            suppress_ragged_eofs=False,
+            server_hostname=self.host)
+        sock.do_handshake()
+        return sock
+
+    def createProxy(self):
+        try:
+            sock = socket.socket()
+            sock.settimeout(self.timeout)
+            sock.connect(
+                (self.proxy[0], int(self.proxy[1]))
             )
-            data = socket_.recv(4096)
-        if socket_.fileno() != -1:
-            socket_.close()
-        return data
+            request = f"""CONNECT {self.host}:443 HTTP/1.1\r\n\r\n""".encode()
+            sock.send(request)
+            
+            connect_resp = sock.recv(4096)
+            if connect_resp.startswith(b"HTTP/1.1 200"):
+                return self.sslWrap(sock)
+        except:
+            return None
 
 
-    def post_req(self, host, path, data, port=80, ssl=False):
-        if ssl:
-            socket_ = ssl.wrap_socket(socket.socket(socket.AF_INET, socket.SOCK_STREAM))
-        else:
-            socket_ = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        socket_.connect((host, port))
-        socket_.send(
-            f"POST {path} HTTP/1.0\r\nHost: {host}\r\nContent-Length: {len(data)}\r\n\r\n{data}".encode('utf-8')
+    def create(self, proxy=None):
+        sock = socket.socket()
+        sock.settimeout(self.timeout)
+        sock.connect(
+            (self.host, 443)
         )
-        data = socket_.recv(4096)
-        if socket_.fileno() != -1:
-            socket_.close()
-        return data
+        sock = self.sslWrap(sock)
 
+        return sock
 
-    def put_req(self, host, path, data, port=80, ssl=False):
-        if ssl:
-            socket_ = ssl.wrap_socket(socket.socket(socket.AF_INET, socket.SOCK_STREAM))
-        else:
-            socket_ = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        socket_.connect((host, port))
-        socket_.send(
-            f"PUT {path} HTTP/1.0\r\nHost: {host}\r\nContent-Length: {len(data)}\r\n\r\n{data}".encode('utf-8')
-        )
-        data = socket_.recv(4096)
-        if socket_.fileno() != -1:
-            socket_.close()
-        return data
+    def lowerByte(self, byte):
+        byteString = byte.decode()
+        byteLower = byteString.lower().encode()
+        return byteLower
 
+    def send(self, sock, data):
+        sock.sendall(data)
+        response, body = sock.recv(blocksize).split(b"\r\n\r\n", 1)
+        lowerResponse = self.lowerByte(response)
+        content_length = int(lowerResponse.split(b"content-length: ", 1)[1].split(b"\r\n", 1)[0])
+        while content_length > len(body):
+            body += sock.recv(blocksize)
 
-    def request(self, method, host, path, data='', port=80, ssl=False):
-        if ssl:
-            socket_ = ssl.wrap_socket(socket.socket(socket.AF_INET, socket.SOCK_STREAM))
-        else:
-            socket_ = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        socket_.connect((host, port))
-        if data:
-            socket_.send(
-                f"{method.upper()} {path} HTTP/1.0\r\nHost: {host}\r\nContent-Length: {len(data)}\r\n\r\n{data}".encode('utf-8')
-            )
-        else:
-            socket_.send(
-                f"{method.upper()} {path} HTTP/1.0\r\nHost: {host}\r\n\r\n".encode('utf-8')
-            )
-        data = socket_.recv(4096)
-        if socket_.fileno() != -1:
-            socket_.close()
-        return data
+        return body
 
+    def parseHeaders(self, headers):
+        if headers is None:
+            return ""
+        headersRequest = ""
+        for headerType, headerValue in headers.items():
+            headersRequest += f"{headerType}: {headerValue}\r\n"
+        return headersRequest
 
-    def request_multiprocess(self, method, host, path, data='', port=80, ssl=False, process_count=1000):
-        p = multiprocessing.Pool(process_count)
-        results = []
-        for _ in range(process_count):
-            results.append(p.apply_async(method, args=[host, path, data, port, ssl]))
-        p.close()
-        p.join()
-        return results
+    def get(self, resource, headers=None):
+        headers = self.parseHeaders(headers)
+        request = f"""GET {resource} HTTP/1.1\r\nHost: {self.host}\r\n{headers}\r\n\r\n""".encode()
+
+        return self.send(self.connection, request)
+
+    def post(self, resource, data, headers=None):
+        headers = self.parseHeaders(headers)
+        contentLength = len(json.dumps(data))
+        request = f"""
+POST {resource} HTTP/1.1\r
+Host: {self.host}\r
+Content-Type: application/json\r
+{headers}
+Content-Length: {contentLength}\r\n\r\n{data}""".encode()
+        return self.send(self.connection, request)
