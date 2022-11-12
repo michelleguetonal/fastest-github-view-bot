@@ -1,6 +1,7 @@
 from wrapper import *
 import threading
 import user_agent
+from pystyle import Colorate, Colors, Center
 
 
 def __get__req():
@@ -17,7 +18,7 @@ def __get__req():
         ok = lol.decode()  # ; print(ok)
         if "Profile views" in ok:
             total = ok.split('role="img" aria-label="Profile views: ')[1].split('"')[0]
-            print(f"views sent | total views: {total}")
+            print(Colorate.Horizontal(Colors.purple_to_blue, (f"views sent | total views: {total}")))
         else:
             print("view failed")
     except Exception:
